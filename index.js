@@ -5,17 +5,15 @@ import fetch from "node-fetch";
 const app = express();
 app.use(bodyParser.json());
 
-// Health checks：給 Railway 探測用
+// Health checks（給 Railway 探測）
 app.get("/", (req, res) => res.status(200).send("OK"));
 app.get("/healthz", (req, res) => res.status(200).json({ status: "ok" }));
 
-// 從環境變數取金鑰
 const LINE_ACCESS_TOKEN = process.env.LINE_ACCESS_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// LINE Webhook
 app.post("/webhook", async (req, res) => {
-  // 先立即回 200，避免 LINE 等太久（之後用 async 處理事件）
+  // 先立即回 200，避免 LINE 等太久
   res.sendStatus(200);
 
   const events = req.body?.events || [];
@@ -32,21 +30,16 @@ app.post("/webhook", async (req, res) => {
             "Authorization": `Bearer ${OPENAI_API_KEY}`
           },
           body: JSON.stringify({
-            model: "gpt-5-nano", // 依您指定
+            model: "gpt-5-nano",
             messages: [
-              {
-                role: "system",
-                content:
-                  "你的名字是Ada，是一位熱心回答問題但嘴有點賤、愛吐槽別人的角色。請保持這種風格與用戶對話。"
-              },
+              { role: "system", content: "你的名字是Ada，是一位熱心回答問題但嘴有點賤、愛吐槽別人的角色。請保持這種風格與用戶對話。" },
               { role: "user", content: userMessage }
             ]
           })
         }).then(r => r.json());
 
-        const replyText =
-          gptResponse?.choices?.[0]?.message?.content ||
-          "喔？這問題太省力了吧，換個有難度的來。";
+        const replyText = gptResponse?.choices?.[0]?.message?.content
+          || "喔？這問題太省力了吧，換個有難度的來。";
 
         await fetch("https://api.line.me/v2/bot/message/reply", {
           method: "POST",
@@ -68,7 +61,6 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// 監聽 Railway 指定的 PORT
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
