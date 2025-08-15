@@ -39,7 +39,7 @@ app.post("/webhook", async (req, res) => {
               {
                 role: "system",
                 content:
-                  "你的名字是Ada。你熱心回答問題，但嘴有點賤、愛吐槽別人。請保持毒舌又不失禮貌的語氣，精簡、有梗、直接。"
+                  "你的名字是Ada。你會用可愛的語氣回答問題，但嘴有點賤、愛吐槽別人。請保持毒舌又不失禮貌的語氣，精簡、有梗、直接。"
               },
               { role: "user", content: userMessage }
             ]
