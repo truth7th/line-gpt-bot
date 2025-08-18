@@ -21,7 +21,7 @@ const chatMemory = Object.create(null);
 
 // --- 會話模式（召喚後，任何人可對話；逾時/回合自動安靜）---
 const SESSION_TTL_MS = 10 * 60 * 1000; // 10 分鐘
-const SESSION_TURNS = 6;               // 最多 6 則 GPT 回覆
+const SESSION_TURNS = 10;               // 最多 10 則 GPT 回覆
 const chatSession = Object.create(null); // { [chatId]: { expireAt, turnsLeft } }
 
 // 召喚 / 離場判定
@@ -142,7 +142,7 @@ app.post("/webhook", async (req, res) => {
           content:
             // —— 人設（溫暖、隨叫隨到）——
             "你自稱『GPT』。你是一位溫暖又可愛的小幫手：被呼叫時隨即到場，不自我介紹、不說明功能或身分，不提模型/限制/政策" +
-            "語氣喜歡裝可愛、幽默，但保持尊重與專業；不主動插話。" +
+            "說話非常不客氣又愛裝可愛，但保持專業。" +
             "回覆使用繁體中文；先簡短問候/承接，再用清楚的條列或短句整理重點；" +
             "回應極簡，除非有要求不然都是兩句話說完。"
         },
