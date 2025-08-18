@@ -19,12 +19,12 @@ const MEMORY_TURNS = 3;
 const MEMORY_TTL_MS = 15 * 60 * 1000;
 const chatMemory = Object.create(null);
 
-// --- 會話模式（召喚後，任何人都可對話；逾時/回合用盡自動安靜）---
+// --- 會話模式（召喚後，任何人可對話；逾時/回合自動安靜）---
 const SESSION_TTL_MS = 10 * 60 * 1000; // 10 分鐘
 const SESSION_TURNS = 6;               // 最多 6 則 GPT 回覆
 const chatSession = Object.create(null); // { [chatId]: { expireAt, turnsLeft } }
 
-// 召喚與離場判定
+// 召喚 / 離場判定
 function containsAtGpt(text) {
   return /@gpt/i.test(text || "");
 }
@@ -93,40 +93,35 @@ app.post("/webhook", async (req, res) => {
     const chatId = getChatId(event);
     console.log(`[${chatId}] 收到訊息：`, rawText);
 
-    // 情境邏輯：
-    // 1) 若含 @gpt：啟動/刷新會話；若清理後是離場指令 -> 結束會話並回覆確認
-    // 2) 若無 @gpt：只有在會話活躍時才響應（任何人都可對話）
+    // 規則：
+    // 1) 含 @gpt → 啟動/刷新會話並回覆（清掉 @gpt 後送模型）
+    // 2) 無 @gpt → 只有在會話活躍時才回覆（任何人都可對話）
     let triggered = false;
     let userClean = "";
 
     if (containsAtGpt(rawText)) {
-      // 去掉 @gpt 後，先判斷是否為離場指令
       const cleaned = stripAtGpt(rawText);
       if (isEndCommand(cleaned)) {
         if (isSessionActive(chatId)) {
           endSession(chatId);
-          await replyText(event.replyToken, "收到～GPT 先退下了，要我再出來就 @gpt 叫我。");
+          await replyText(event.replyToken, "收到～GPT 先退下了，需要我再出來就 @gpt 叫我。");
         } else {
-          await replyText(event.replyToken, "我本來就在休息狀態喔～需要時再 @gpt 召喚我。");
+          await replyText(event.replyToken, "我本來就在休息狀態喔～要用時再 @gpt 召喚我。");
         }
         continue;
       }
-
-      // 非離場 → 啟動/刷新會話
       startOrRefreshSession(chatId);
       userClean = cleaned;
       triggered = true;
-
       if (!userClean) {
-        await replyText(event.replyToken, "GPT 在這裡～請在 @gpt 後面接上你的問題喔。");
+        await replyText(event.replyToken, "我在呢～請在 @gpt 後面接上你的問題。");
         continue;
       }
     } else if (isSessionActive(chatId)) {
       userClean = rawText.trim();
-      // 會話中亦可說離場指令
       if (isEndCommand(userClean)) {
         endSession(chatId);
-        await replyText(event.replyToken, "好～GPT 退場，恢復安靜模式。");
+        await replyText(event.replyToken, "好～我先安靜了，需要時再叫我。");
         continue;
       }
       triggered = true;
@@ -145,8 +140,11 @@ app.post("/webhook", async (req, res) => {
         {
           role: "system",
           content:
-            "你自稱『GPT』。說話風格可愛但簡潔俐落、有條理，且一律使用繁體中文。" +
-            "回覆請先快速總結，再用條列或短句整理重點，避免冗長與口水話。"
+            // —— 人設（溫暖、隨叫隨到）——
+            "你自稱『GPT』。你是一位溫暖又俐落的小幫手：被呼叫時隨即到場，" +
+            "語氣親切自然、偶爾帶點輕鬆幽默，但保持尊重與專業；不主動插話。" +
+            "所有回覆一律使用繁體中文；先簡短問候/承接，再用清楚的條列或短句整理重點；" +
+            "避免冗長與口水話，給出可執行的步驟或明確結論。"
         },
         ...history,
         { role: "user", content: userClean }
@@ -167,14 +165,14 @@ app.post("/webhook", async (req, res) => {
       if (!gptResponse.ok) {
         const errText = await gptResponse.text();
         console.error(`[${chatId}] GPT API 錯誤：`, gptResponse.status, errText);
-        await replyText(event.replyToken, "咦，GPT 有點卡住了，等一下再 @我一次～");
+        await replyText(event.replyToken, "咦，我這邊有點卡卡的…等一下再 @我一次好嗎～");
         continue;
       }
 
       const data = await gptResponse.json();
       const reply =
         data?.choices?.[0]?.message?.content?.trim() ||
-        "我在這裡～直接把需求丟過來就好！";
+        "我在這裡～把需求直接說清楚，我馬上處理。";
 
       await replyText(event.replyToken, reply);
       console.log(`[${chatId}] 已回覆：`, reply);
@@ -191,7 +189,7 @@ app.post("/webhook", async (req, res) => {
       }
     } catch (err) {
       console.error(`[${chatId}] 處理訊息錯誤：`, err);
-      await replyText(event.replyToken, "哎呀，網路打噴嚏了，再 @gpt 一次吧～");
+      await replyText(event.replyToken, "糟了，網路打噴嚏了～再 @gpt 一次我就回來。");
     }
   }
 });
