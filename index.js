@@ -19,33 +19,66 @@ const MEMORY_TURNS = 3;
 const MEMORY_TTL_MS = 15 * 60 * 1000;
 const chatMemory = Object.create(null);
 
-function getChatId(event) {
-  return event?.source?.groupId || event?.source?.roomId || event?.source?.userId || "unknown";
+// --- 會話模式（召喚後，任何人都可對話；逾時/回合用盡自動安靜）---
+const SESSION_TTL_MS = 10 * 60 * 1000; // 10 分鐘
+const SESSION_TURNS = 6;               // 最多 6 則 GPT 回覆
+const chatSession = Object.create(null); // { [chatId]: { expireAt, turnsLeft } }
+
+// 召喚與離場判定
+function containsAtGpt(text) {
+  return /@gpt/i.test(text || "");
 }
-function now() { return Date.now(); }
-function pruneExpired(chatId) {
-  const list = chatMemory[chatId] || [];
-  chatMemory[chatId] = list.filter(m => now() - m.ts < MEMORY_TTL_MS);
-}
-function pushMemory(chatId, role, content) {
-  if (!chatMemory[chatId]) chatMemory[chatId] = [];
-  chatMemory[chatId].push({ role, content, ts: now() });
-  const keep = MEMORY_TURNS * 2;
-  if (chatMemory[chatId].length > keep) {
-    chatMemory[chatId] = chatMemory[chatId].slice(-keep);
-  }
+function isEndCommand(text) {
+  const t = (text || "").trim().toLowerCase();
+  return /^(結束|離開|退下|閉嘴|bye|end|stop|睡覺)$/.test(t);
 }
 
-// --- 觸發條件：訊息中含有「@gpt」 ---
-function shouldTrigger(text) {
-  if (!text) return false;
-  return /@gpt/i.test(text);
-}
-
-// --- 去掉所有「@gpt」標註，回傳乾淨內容 ---
+// 去掉所有「@gpt」
 function stripAtGpt(text) {
   if (!text) return "";
   return text.replace(/@gpt/gi, "").trim();
+}
+
+// 會話控制
+function isSessionActive(chatId) {
+  const s = chatSession[chatId];
+  return !!(s && s.expireAt > Date.now() && s.turnsLeft > 0);
+}
+function startOrRefreshSession(chatId) {
+  if (!chatSession[chatId]) {
+    chatSession[chatId] = { expireAt: 0, turnsLeft: SESSION_TURNS };
+  }
+  chatSession[chatId].expireAt = Date.now() + SESSION_TTL_MS;
+  if (chatSession[chatId].turnsLeft <= 0) chatSession[chatId].turnsLeft = SESSION_TURNS;
+  console.log(`[${chatId}] 會話啟動/刷新 turns=${chatSession[chatId].turnsLeft}`);
+}
+function consumeTurn(chatId) {
+  if (!chatSession[chatId]) return;
+  chatSession[chatId].turnsLeft = Math.max(0, chatSession[chatId].turnsLeft - 1);
+  if (chatSession[chatId].turnsLeft === 0) {
+    console.log(`[${chatId}] 會話達回合上限，待逾時後安靜`);
+  }
+}
+function endSession(chatId) {
+  delete chatSession[chatId];
+  console.log(`[${chatId}] 會話結束（手動離場或逾時）`);
+}
+
+// 輔助：聊天 id 與記憶
+function getChatId(event) {
+  return event?.source?.groupId || event?.source?.roomId || event?.source?.userId || "unknown";
+}
+function pruneExpiredMemory(chatId) {
+  const list = chatMemory[chatId] || [];
+  chatMemory[chatId] = list.filter(m => Date.now() - m.ts < MEMORY_TTL_MS);
+}
+function pushMemory(chatId, role, content) {
+  if (!chatMemory[chatId]) chatMemory[chatId] = [];
+  chatMemory[chatId].push({ role, content, ts: Date.now() });
+  const keep = MEMORY_TURNS * 2; // user+assistant 視為一輪
+  if (chatMemory[chatId].length > keep) {
+    chatMemory[chatId] = chatMemory[chatId].slice(-keep);
+  }
 }
 
 // --- LINE Webhook ---
@@ -60,28 +93,60 @@ app.post("/webhook", async (req, res) => {
     const chatId = getChatId(event);
     console.log(`[${chatId}] 收到訊息：`, rawText);
 
-    // 僅當含有 @gpt 才觸發
-    if (!shouldTrigger(rawText)) {
-      console.log(`[${chatId}] 未觸發（未含 @gpt），忽略。`);
-      continue;
+    // 情境邏輯：
+    // 1) 若含 @gpt：啟動/刷新會話；若清理後是離場指令 -> 結束會話並回覆確認
+    // 2) 若無 @gpt：只有在會話活躍時才響應（任何人都可對話）
+    let triggered = false;
+    let userClean = "";
+
+    if (containsAtGpt(rawText)) {
+      // 去掉 @gpt 後，先判斷是否為離場指令
+      const cleaned = stripAtGpt(rawText);
+      if (isEndCommand(cleaned)) {
+        if (isSessionActive(chatId)) {
+          endSession(chatId);
+          await replyText(event.replyToken, "收到～GPT 先退下了，要我再出來就 @gpt 叫我。");
+        } else {
+          await replyText(event.replyToken, "我本來就在休息狀態喔～需要時再 @gpt 召喚我。");
+        }
+        continue;
+      }
+
+      // 非離場 → 啟動/刷新會話
+      startOrRefreshSession(chatId);
+      userClean = cleaned;
+      triggered = true;
+
+      if (!userClean) {
+        await replyText(event.replyToken, "GPT 在這裡～請在 @gpt 後面接上你的問題喔。");
+        continue;
+      }
+    } else if (isSessionActive(chatId)) {
+      userClean = rawText.trim();
+      // 會話中亦可說離場指令
+      if (isEndCommand(userClean)) {
+        endSession(chatId);
+        await replyText(event.replyToken, "好～GPT 退場，恢復安靜模式。");
+        continue;
+      }
+      triggered = true;
     }
 
-    const userClean = stripAtGpt(rawText);
-    if (!userClean) {
-      await replyText(event.replyToken, "GPT 在這裡～請在訊息裡 @我 並加上你的問題喔。");
+    if (!triggered) {
+      console.log(`[${chatId}] 未觸發（需召喚或會話活躍），忽略。`);
       continue;
     }
 
     try {
-      pruneExpired(chatId);
+      // 記憶與訊息組裝
+      pruneExpiredMemory(chatId);
       const history = (chatMemory[chatId] || []).map(m => ({ role: m.role, content: m.content }));
-
       const messages = [
         {
           role: "system",
           content:
-            "你自稱『GPT』。說話風格可愛但簡潔俐落、有條理，必須一律使用繁體中文。" +
-            "回覆請活潑又不囉嗦，能快速總結，再用條列或短句整理重點。"
+            "你自稱『GPT』。說話風格可愛但簡潔俐落、有條理，且一律使用繁體中文。" +
+            "回覆請先快速總結，再用條列或短句整理重點，避免冗長與口水話。"
         },
         ...history,
         { role: "user", content: userClean }
@@ -102,30 +167,36 @@ app.post("/webhook", async (req, res) => {
       if (!gptResponse.ok) {
         const errText = await gptResponse.text();
         console.error(`[${chatId}] GPT API 錯誤：`, gptResponse.status, errText);
-        await replyText(event.replyToken, "GPT 剛剛打了個盹，請再 @我一次～");
+        await replyText(event.replyToken, "咦，GPT 有點卡住了，等一下再 @我一次～");
         continue;
       }
 
       const data = await gptResponse.json();
       const reply =
         data?.choices?.[0]?.message?.content?.trim() ||
-        "我在這裡呀！只要在訊息中加上 @gpt，再告訴我需求就好～";
+        "我在這裡～直接把需求丟過來就好！";
 
       await replyText(event.replyToken, reply);
       console.log(`[${chatId}] 已回覆：`, reply);
 
-      // 紀錄對話
+      // 更新記憶
       pushMemory(chatId, "user", userClean);
       pushMemory(chatId, "assistant", reply);
 
+      // 會話維持：刷新壽命、消耗回合
+      if (isSessionActive(chatId)) {
+        chatSession[chatId].expireAt = Date.now() + SESSION_TTL_MS;
+        consumeTurn(chatId);
+        if (!isSessionActive(chatId)) endSession(chatId);
+      }
     } catch (err) {
       console.error(`[${chatId}] 處理訊息錯誤：`, err);
-      await replyText(event.replyToken, "哎呀，GPT 被噴嚏打斷了，再 @我一次吧～");
+      await replyText(event.replyToken, "哎呀，網路打噴嚏了，再 @gpt 一次吧～");
     }
   }
 });
 
-// --- LINE 回覆函數 ---
+// --- LINE 回覆 ---
 async function replyText(replyToken, text) {
   return fetch("https://api.line.me/v2/bot/message/reply", {
     method: "POST",
